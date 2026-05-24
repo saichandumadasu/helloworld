@@ -1,0 +1,14 @@
+# ignore node_modules
+node_modules/
+# ignore virtual environments
+venv/
+.venv/
+# ignore Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info  
+
+.env
