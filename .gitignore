@@ -12,3 +12,10 @@ wheels/
 *.egg-info  
 
 .env
+
+# ignore Terraform all unnecessary files
+*.tfstate
+*.tfstate.backup
+.terraform/
+.terraform.lock.hcl
+
