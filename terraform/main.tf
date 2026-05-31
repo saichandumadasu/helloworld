@@ -85,10 +85,10 @@ resource "aws_security_group" "sg" {
 
 resource "aws_instance" "example" {
   ami           = data.aws_ami.ubuntu.id
-  instance_type = "t3.micro"
+  instance_type = "t3.medium"
   vpc_security_group_ids = [aws_security_group.sg.id]
   key_name = aws_key_pair.hello_world.key_name
-  user_data_base64 = base64encode(file("${path.module}/user_data.sh"))
+  user_data = file("${path.module}/user_data.sh")
   tags = {
     Name = "HelloWorld"
   }
