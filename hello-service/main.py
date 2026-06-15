@@ -1,5 +1,4 @@
 from fastapi import FastAPI
-
 app = FastAPI()
 
 
@@ -10,3 +9,7 @@ def hello():
 @app.get("/")
 def root():
     return {"message": "Welcome to hello!"}
+
+@app.get("/hello/{name}")
+def hello_name(name: str):
+    return {"message": f"Hello {name}!"}
