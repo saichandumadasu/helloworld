@@ -32,13 +32,13 @@ jobs:
       # need to go inside hello-server directory to build the docker image
       - name: build docker image
         run: |
-          cd hello-server
+          cd hello-service
           ls -lart
           docker build -t ${{ secrets.DOCKER_USERNAME }}/hello-world:${{ env.TAG }} .
           docker images
       - name: push docker image
         run: |
-          cd hello-server
+          cd hello-service
           docker images
           docker tag ${{ secrets.DOCKER_USERNAME }}/hello-world:${{ env.TAG }} ${{ secrets.DOCKER_USERNAME }}/hello-world:${{ env.TAG }}
           docker images
