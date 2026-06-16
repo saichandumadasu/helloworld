@@ -1,0 +1,44 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: hello-service
+  labels:
+    app: hello-service
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: hello-service
+  template:
+    metadata:
+      labels:
+        app: hello-service
+    spec:
+      containers:
+      - name: hello-service
+        image: madasusaichandu/hello-world:20260615121511
+        ports:
+        - containerPort: 8000
+
+
+#-----service.yaml-----
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: hello-service
+  labels:
+    app: hello-service
+  annotations:
+    prometheus.io/scrape: "true"
+    prometheus.io/path: "/metrics"
+    prometheus.io/port: "80"
+spec:
+  type: ClusterIP
+  selector:
+    app: hello-service
+  ports:
+  - protocol: TCP
+    port: 80
+    targetPort: 8000
+    name: http

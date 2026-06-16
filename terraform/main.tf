@@ -1,18 +1,10 @@
+# EKS aws managed node group with terraform
 terraform {
   required_providers {
     aws = {
       source  = "hashicorp/aws"
       version = "~> 6.0"
     }
-    tls = {
-      source  = "hashicorp/tls"
-      version = "~> 4.0"
-    }
-    local = {
-        source  = "hashicorp/local"
-        version = "~> 2.0"
-    }
-
   }
 }
 
@@ -21,83 +13,262 @@ provider "aws" {
   region = "ap-south-1"
 }
 
-resource "tls_private_key" "hello_world" {
-  algorithm = "RSA"
-  rsa_bits  = 4096
-}
+resource "aws_vpc" "main" {
+  cidr_block       = "10.0.0.0/16"
+  instance_tenancy = "default"
+  enable_dns_support   = true
+  enable_dns_hostnames = true
 
-resource "local_file" "private_key" {
-  content  = tls_private_key.hello_world.private_key_pem
-  filename = "${path.module}/private_key.pem"
-  # permission
-    file_permission = "0600"
-}
-
-resource "aws_key_pair" "hello_world" {
-  key_name   = "my-key-pair" # Replace with your desired key pair name
-  public_key = tls_private_key.hello_world.public_key_openssh
-}
-
-
-data "aws_ami" "ubuntu" {
-  most_recent = true
-
-  filter {
-    name   = "name"
-    values = ["ubuntu/images/hvm-ssd/ubuntu-jammy-22.04-amd64-server-*"]
-  }
-
-  filter {
-    name   = "virtualization-type"
-    values = ["hvm"]
-  }
-
-  owners = ["099720109477"] # Canonical
-}
-
-output "ami_id" {
-  value = data.aws_ami.ubuntu.id
-}
-
-resource "aws_security_group" "sg" {
-  name        = "allow_ssh"
-  description = "Allow SSH inbound traffic"
-
-  ingress {
-    from_port   = 22
-    to_port     = 22
-    protocol    = "tcp"
-    cidr_blocks = ["0.0.0.0/0"]
-  }
-  ingress {
-    from_port = 8080
-    to_port   = 8080
-    protocol  = "tcp"
-    cidr_blocks = ["0.0.0.0/0"]
-  }
-  egress {
-    from_port   = 0
-    to_port     = 0
-    protocol    = "-1"
-    cidr_blocks = ["0.0.0.0/0"]
-  }
-}
-
-resource "aws_instance" "example" {
-  ami           = data.aws_ami.ubuntu.id
-  instance_type = "t3.medium"
-  vpc_security_group_ids = [aws_security_group.sg.id]
-  key_name = aws_key_pair.hello_world.key_name
-  user_data = file("${path.module}/user_data.sh")
   tags = {
-    Name = "HelloWorld"
+    Name = "main"
   }
 }
 
-output "instance_id" {
-  value = aws_instance.example.id
+resource "aws_internet_gateway" "gw" {
+  vpc_id = aws_vpc.main.id
+
+  tags = {
+    Name = "main"
+  }
 }
 
-output "ssh_command" {
-  value = "ssh -i ${local_file.private_key.filename} ubuntu@${aws_instance.example.public_ip}"
+data "aws_availability_zones" "available" {
+  state = "available"
+}
+
+resource "aws_subnet" "public" {
+  count                  = 2
+  vpc_id                  = aws_vpc.main.id
+  cidr_block              = cidrsubnet(aws_vpc.main.cidr_block, 8, count.index)
+  availability_zone       = data.aws_availability_zones.available.names[count.index]
+  map_public_ip_on_launch = true
+  
+  tags = {
+    Name = "public"
+  }
+}
+
+resource "aws_subnet" "private" {
+  count                  = 2
+  vpc_id                  = aws_vpc.main.id
+  cidr_block              = cidrsubnet(aws_vpc.main.cidr_block, 8, count.index + 2)
+  availability_zone       = data.aws_availability_zones.available.names[count.index]
+  map_public_ip_on_launch = false
+
+  tags = {
+    Name = "private"
+  }
+}
+
+resource "aws_route_table" "public" {
+  vpc_id = aws_vpc.main.id
+
+  route {
+    cidr_block = "0.0.0.0/0"
+    gateway_id = aws_internet_gateway.gw.id
+  }
+
+  tags = {
+    Name = "public"
+    
+  }
+
+}
+
+resource "aws_route_table_association" "public" {
+  count          = 2
+  subnet_id      = aws_subnet.public[count.index].id
+  route_table_id = aws_route_table.public.id
+}
+
+
+resource "aws_eip" "nat" {
+  domain = "vpc"
+  depends_on = [aws_internet_gateway.gw]
+}
+
+resource "aws_nat_gateway" "nat" {
+  allocation_id = aws_eip.nat.id
+  subnet_id     = aws_subnet.public[0].id
+
+  tags = {
+    Name = "nat"
+  }
+}
+
+resource "aws_route_table" "private" {
+  vpc_id = aws_vpc.main.id
+
+  route {
+    cidr_block     = "0.0.0.0/0"
+    nat_gateway_id = aws_nat_gateway.nat.id
+  }
+
+  tags = {
+    Name = "private"
+  }
+  depends_on = [aws_nat_gateway.nat]
+}
+
+resource "aws_route_table_association" "private" {
+  count          = 2
+  subnet_id      = aws_subnet.private[count.index].id
+  route_table_id = aws_route_table.private.id
+}
+
+resource "aws_eks_cluster" "my_cluster" {
+  name = "my-cluster"
+
+  access_config {
+    authentication_mode = "API"
+    bootstrap_cluster_creator_admin_permissions = true
+  }
+
+  role_arn = aws_iam_role.cluster.arn
+  version  = "1.35"
+
+  vpc_config {
+    subnet_ids = [
+      aws_subnet.public[0].id,
+      aws_subnet.public[1].id,
+      aws_subnet.private[0].id,
+      aws_subnet.private[1].id,
+    ]
+  }
+
+  # Ensure that IAM Role permissions are created before and deleted
+  # after EKS Cluster handling. Otherwise, EKS will not be able to
+  # properly delete EKS managed EC2 infrastructure such as Security Groups.
+  depends_on = [
+    aws_iam_role_policy_attachment.cluster_AmazonEKSClusterPolicy,
+  ]
+}
+
+resource "aws_iam_role" "cluster" {
+  name = "eks-cluster-example"
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Action = [
+          "sts:AssumeRole",
+          "sts:TagSession"
+        ]
+        Effect = "Allow"
+        Principal = {
+          Service = "eks.amazonaws.com"
+        }
+      },
+    ]
+  })
+}
+
+resource "aws_iam_role_policy_attachment" "cluster_AmazonEKSClusterPolicy" {
+  policy_arn = "arn:aws:iam::aws:policy/AmazonEKSClusterPolicy"
+  role       = aws_iam_role.cluster.name
+}
+
+
+resource "aws_eks_node_group" "node_group_ondemand" {
+  cluster_name    = aws_eks_cluster.my_cluster.name
+  node_group_name = "my-node-group-ondemand"
+
+  node_role_arn   = aws_iam_role.example.arn
+  subnet_ids      = [
+    aws_subnet.private[0].id,
+    aws_subnet.private[1].id,
+  ]
+
+  capacity_type = "ON_DEMAND"
+  instance_types = ["t3.medium"]
+
+  scaling_config {
+    desired_size = 1
+    max_size     = 2
+    min_size     = 1
+  }
+
+  update_config {
+    max_unavailable = 1
+  }
+
+  tags = {
+    Name = "my-node-group-ondemand"
+    Environment = "dev"
+  }
+  depends_on = [
+    aws_iam_role_policy_attachment.example-AmazonEKSWorkerNodePolicy,
+    aws_iam_role_policy_attachment.example-AmazonEKS_CNI_Policy,
+    aws_iam_role_policy_attachment.example-AmazonEC2ContainerRegistryReadOnly,
+  ]
+ }
+
+
+resource "aws_eks_node_group" "node_group_spot" {
+  cluster_name    = aws_eks_cluster.my_cluster.name
+  node_group_name = "my-node-group-spot"
+
+  node_role_arn   = aws_iam_role.example.arn
+
+  subnet_ids      = [
+    aws_subnet.private[0].id,
+    aws_subnet.private[1].id,
+  ]
+
+  capacity_type = "SPOT"
+  instance_types = ["t3.medium"]
+
+  scaling_config {
+    desired_size = 1
+    max_size     = 2
+    min_size     = 1
+  }
+
+  update_config {
+    max_unavailable = 1
+  }
+
+  tags = {
+    Name = "my-node-group-spot"
+    Environment = "dev"
+  }
+  depends_on = [
+    aws_iam_role_policy_attachment.example-AmazonEKSWorkerNodePolicy,
+    aws_iam_role_policy_attachment.example-AmazonEKS_CNI_Policy,
+    aws_iam_role_policy_attachment.example-AmazonEC2ContainerRegistryReadOnly,
+  ]
+
+
+}
+
+
+
+resource "aws_iam_role" "example" {
+  name = "eks-node-group-example"
+
+  assume_role_policy = jsonencode({
+    Statement = [{
+      Action = "sts:AssumeRole"
+      Effect = "Allow"
+      Principal = {
+        Service = "ec2.amazonaws.com"
+      }
+    }]
+    Version = "2012-10-17"
+  })
+}
+
+resource "aws_iam_role_policy_attachment" "example-AmazonEKSWorkerNodePolicy" {
+  policy_arn = "arn:aws:iam::aws:policy/AmazonEKSWorkerNodePolicy"
+  role       = aws_iam_role.example.name
+}
+
+resource "aws_iam_role_policy_attachment" "example-AmazonEKS_CNI_Policy" {
+  policy_arn = "arn:aws:iam::aws:policy/AmazonEKS_CNI_Policy"
+  role       = aws_iam_role.example.name
+}
+
+resource "aws_iam_role_policy_attachment" "example-AmazonEC2ContainerRegistryReadOnly" {
+  policy_arn = "arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryReadOnly"
+  role       = aws_iam_role.example.name
 }
